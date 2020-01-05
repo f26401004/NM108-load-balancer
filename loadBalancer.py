@@ -9,12 +9,16 @@ from ryu.lib.packet import arp
 from ryu.lib.packet import ipv4
 from ryu.lib.packet import ethernet
 from ryu.lib.packet.ether_types import ETH_TYPE_ARP, ETH_TYPE_IP, ETH_TYPE_LLDP
+from ryu.lib.packet import in_proto
 
 class LoadBalancer(app_manager.RyuApp):
   # declare what version of the open-flow adapted in this application
   OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
 
   VIRTUAL_IP = '10.0.0.100'
+  FILTER_TABLE = 1
+  MATCH_TABLE = 2
+  FORWARD_TABLE = 3
 
   def __init__(self, *args, **kwargs):
     super(LoadBalancer, self).__init__(*args, **kwargs)
@@ -47,6 +51,23 @@ class LoadBalancer(app_manager.RyuApp):
     mod = parser.OFPFlowMod(datapath=datapath, table_id=0, instructions=inst)
     datapath.send_msg(mod)
 
+  def add_filter_table(self, datapath):
+    ofproto = datapath.ofproto
+    parser = datapath.ofproto_parser
+    inst = [parser.OFPInstructionGotoTable(self.FORWARD_TABLE)]
+    mod = parser.OFPFlowMod(datapath=datapath, table_id=self.FILTER_TABLE, instructions=inst)
+    datapath.send_msg(mod)
+
+
+  def apply_filter_table_rules(self, datapath):
+    ofproto = datapath.ofproto
+    parser = datapath.ofproto_parser
+    match = parser.OFPMatch(eth_type=ETH_TYPE_LLDP)
+    inst = [parser.OFPInstructionActions(ofproto.OFPIT_CLEAR_ACTIONS, [])]
+    mod = parser.OFPFlowMod(datapath=datapath, table_id=self.FILTER_TABLE,
+      priority=10000, match=match, instructions=inst)
+    datapath.send_msg(mod)
+
   # the function is called when controller is just started,
   @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
   def switch_features_handler(self, event):
@@ -54,11 +75,19 @@ class LoadBalancer(app_manager.RyuApp):
     ofproto = datapath.ofproto
     parser = datapath.ofproto_parser
 
+
+
+    self.add_default_table(datapath)
+    self.add_filter_table(datapath)
+    self.apply_filter_table_rules(datapath)
+
     # config the table-miss flow entry for controller controll the traffic
     # in the network 
     match = parser.OFPMatch()
     actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, ofproto.OFPCML_NO_BUFFER)]
     self.add_flow(datapath, 0, match, actions)
+
+
 
   # the function to add the flow entry into the controller
   def add_flow(self, datapath, priority, match, actions, buffer_id=None):
@@ -67,9 +96,9 @@ class LoadBalancer(app_manager.RyuApp):
 
     inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
     if buffer_id:
-      mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id, priority=priority, match=match, instructions=inst)
+      mod = parser.OFPFlowMod(datapath=datapath, buffer_id=buffer_id, priority=priority, table_id=self.FORWARD_TABLE, match=match, instructions=inst)
     else:
-      mod = parser.OFPFlowMod(datapath=datapath, priority=priority, match=match, instructions=inst)
+      mod = parser.OFPFlowMod(datapath=datapath, priority=priority, table_id=self.FORWARD_TABLE, match=match, instructions=inst)
     datapath.send_msg(mod)
 
 
@@ -98,7 +127,7 @@ class LoadBalancer(app_manager.RyuApp):
     if (ethernetFrame.ethertype == ETH_TYPE_LLDP):
       return
 
-    self.logger.info("packet in %s %s %s %s", dpid, src_mac, dst_mac, in_port)
+    # self.logger.info("packet in %s %s %s %s", dpid, src_mac, dst_mac, in_port)
 
     # read the mac address from ethernet frame
     dst_mac = ethernetFrame.dst
@@ -166,7 +195,7 @@ class LoadBalancer(app_manager.RyuApp):
 
     pkt = packet.Packet()
     pkt.add_protocol(
-      ethernet.ethernet(dst=dst_mac, src=src_mac, ethertype=ether_types.ETH_TYPE_ARP)
+      ethernet.ethernet(dst=dst_mac, src=src_mac, ethertype=ETH_TYPE_ARP)
     )
     pkt.add_protocol(
       arp.arp(opcode=arp.ARP_REPLY, src_mac=src_mac, src_ip=src_ip, dst_mac=dst_mac, dst_ip=dst_ip)
